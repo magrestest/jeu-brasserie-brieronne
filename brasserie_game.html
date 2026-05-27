@@ -759,7 +759,252 @@ function drawDoorAnim(c,W,H,ox,oy){
   c.save();c.translate(dx,dy+dh/2);c.transform(1-open*.9,0,0,1,0,0);c.fillStyle='#2a1808';c.fillRect(0,-dh/2,dw/2,dh);c.restore();
   c.save();c.translate(dx+dw,dy+dh/2);c.transform(1-open*.9,0,0,1,0,0);c.fillStyle='#2a1808';c.fillRect(-dw/2,-dh/2,dw/2,dh);c.restore();
 }
+// ═══ QUÊTES ═══
+const QUEST_DEFS = [
+  // Quêtes PNJ — Anthony
+  {id:'q_stock_bar',   giver:'barman',  title:'Ravitailler Le Marais',  desc:'Livrer 30 bouteilles au bar.',         type:'sell_bar',  target:30,  xp:80,  reward:{c:500},  icon:'🍻'},
+  {id:'q_ipa_bar',     giver:'barman',  title:'La Chalandière en fût',  desc:'Brasser une IPA et la livrer.',        type:'brew_ipa',  target:1,   xp:60,  reward:{c:300},  icon:'🍺'},
+  {id:'q_rep_bar',     giver:'barman',  title:'Bonne réputation',       desc:'Atteindre 70 de réputation.',          type:'rep',       target:70,  xp:100, reward:{c:400},  icon:'⭐'},
+  // Quêtes PNJ — Simon
+  {id:'q_buy_mp',      giver:'supplier',title:'Gros stock de malt',     desc:'Acheter 400 MP au total.',             type:'buy_mp',    target:400, xp:60,  reward:{m:100},  icon:'📦'},
+  {id:'q_brew3',       giver:'supplier',title:'Brasseur prolifique',    desc:'Lancer 3 brassins.',                   type:'brews',     target:3,   xp:70,  reward:{c:200},  icon:'🔩'},
+  {id:'q_bigferm',     giver:'supplier',title:'Agrandir la production', desc:'Acheter le gros fermenteur.',          type:'upgrade',   target:'bf',xp:120, reward:{m:200},  icon:'⚙️'},
+  // Quêtes PNJ — Alex
+  {id:'q_sell_market', giver:'customer',title:'L\'approvisionnement',   desc:'Vendre 50 bouteilles au marché.',      type:'sell_market',target:50, xp:80,  reward:{c:350},  icon:'🛒'},
+  {id:'q_blonde',      giver:'customer',title:'La Cabane Bleue en stock',desc:'Avoir 100 bouteilles en stock.',      type:'stock',     target:100, xp:50,  reward:{r:10},   icon:'🍺'},
+  {id:'q_explore',     giver:'customer',title:'Explorateur des marais', desc:'Explorer les 3 zones de marais.',      type:'explore',   target:3,   xp:150, reward:{c:600},  icon:'🌿'},
+];
 
+const DAILY_DEFS = [
+  {id:'d_sell10',  title:'Ventes du jour',      desc:'Vendre 10 bouteilles.',        type:'sell',   target:10, xp:25, reward:{c:100}, icon:'💰'},
+  {id:'d_brew1',   title:'Brassin quotidien',   desc:'Lancer un brassin.',           type:'brews',  target:1,  xp:20, reward:{m:20},  icon:'🍺'},
+  {id:'d_rep5',    title:'Améliorer l\'image',  desc:'Gagner 5 points de rép.',      type:'rep_gain',target:5, xp:15, reward:{c:50},  icon:'⭐'},
+  {id:'d_mp_buy',  title:'Réappro matières',    desc:'Acheter des MP.',              type:'buy_mp', target:50, xp:15, reward:{c:80},  icon:'📦'},
+  {id:'d_sell_bar',title:'Service bar du soir', desc:'Livrer 5 bouteilles au bar.',  type:'sell_bar',target:5, xp:20, reward:{c:120}, icon:'🍻'},
+  {id:'d_explore', title:'Balade dans les marais',desc:'Explorer une zone.',         type:'explore_any',target:1,xp:30,reward:{c:150},icon:'🌿'},
+];
+
+let activeQuests = [];   // {def, progress, done}
+let dailyQuests  = [];   // idem, reset each day
+let questNotifs  = [];   // {text, timer, col}
+let lastDailyDay = 0;
+let questPanelOpen = false;
+// Cumulative trackers (reset each day for dailies)
+let dayStats = {sells:0, sell_bar:0, sell_market:0, brews:0, buy_mp:0, rep_gain:0, explore:0};
+
+function initQuests(){
+  activeQuests = [];
+  dailyQuests  = [];
+  questNotifs  = [];
+  lastDailyDay = 0;
+  dayStats = {sells:0,sell_bar:0,sell_market:0,brews:0,buy_mp:0,rep_gain:0,explore:0};
+}
+
+// Called when talking to a NPC — offer a new quest if they have one pending
+function offerNpcQuest(giverId){
+  const available = QUEST_DEFS.filter(q=>
+    q.giver === giverId &&
+    !activeQuests.find(a=>a.def.id===q.id) &&
+    !G.completedQuests?.has(q.id)
+  );
+  if(!available.length) return;
+  const def = available[Math.floor(Math.random()*available.length)];
+  activeQuests.push({def, progress:0, done:false});
+  pushNotif(`${def.icon} Nouvelle quête : ${def.title}`, '#f0c93a');
+  lg(`Quête reçue : ${def.title} 📋`, 'ev');
+}
+
+function pushNotif(text, col='#f0c93a'){
+  questNotifs.push({text, timer:180, col});
+}
+
+// Track game actions → update quests
+function trackQuest(type, amount=1){
+  // Update daily stats
+  if(type==='sell')       dayStats.sells      +=amount;
+  if(type==='sell_bar')   dayStats.sell_bar   +=amount;
+  if(type==='sell_market')dayStats.sell_market+=amount;
+  if(type==='brews')      dayStats.brews      +=amount;
+  if(type==='buy_mp')     dayStats.buy_mp     +=amount;
+  if(type==='rep_gain')   dayStats.rep_gain   +=amount;
+  if(type==='explore')    dayStats.explore    +=amount;
+
+  // Check active quests
+  [...activeQuests, ...dailyQuests].forEach(q=>{
+    if(q.done) return;
+    const d = q.def;
+    let prog = 0;
+    switch(d.type){
+      case 'sell':        prog = dayStats.sells;       break;
+      case 'sell_bar':    prog = type==='sell_bar'  ? (q.progress+(amount||0)) : q.progress; break;
+      case 'sell_market': prog = type==='sell_market'? (q.progress+(amount||0)) : q.progress; break;
+      case 'brews':       prog = q.progress + (type==='brews'?1:0); break;
+      case 'buy_mp':      prog = q.progress + (type==='buy_mp'?amount:0); break;
+      case 'rep':         prog = G.r; break;
+      case 'stock':       prog = G.s; break;
+      case 'upgrade':     prog = G.upg[d.target]?1:0; break;
+      case 'explore':     prog = [...discovered].filter(x=>x.startsWith('marsh')).length; break;
+      case 'explore_any': prog = q.progress + (type==='explore'?1:0); break;
+      case 'rep_gain':    prog = q.progress + (type==='rep_gain'?amount:0); break;
+      case 'brew_ipa':    prog = q.progress + (type==='brew_ipa'?1:0); break;
+      default:            prog = q.progress;
+    }
+    q.progress = Math.min(prog, d.target);
+    if(q.progress >= d.target && !q.done){
+      q.done = true;
+      completeQuest(q);
+    }
+  });
+}
+
+function completeQuest(q){
+  const d = q.def;
+  // Apply reward
+  if(d.reward.c) G.c += d.reward.c;
+  if(d.reward.m) G.m += d.reward.m;
+  if(d.reward.r) G.r = Math.min(100, G.r + d.reward.r);
+  gainXP(d.xp);
+  // Track completed
+  if(!G.completedQuests) G.completedQuests = new Set();
+  G.completedQuests.add(d.id);
+  pushNotif(`✅ Quête accomplie : ${d.title} !`, '#6abf6a');
+  lg(`Quête accomplie : ${d.title} 🎉 +${d.xp}XP`, 'good');
+  // Remove from active after delay
+  setTimeout(()=>{
+    activeQuests = activeQuests.filter(a=>a!==q);
+    dailyQuests  = dailyQuests.filter(a=>a!==q);
+  }, 3000);
+  rUI();
+}
+
+function checkDailyQuests(){
+  if(G.day === lastDailyDay) return;
+  lastDailyDay = G.day;
+  dayStats = {sells:0,sell_bar:0,sell_market:0,brews:0,buy_mp:0,rep_gain:0,explore:0};
+  // Remove old completed dailies
+  dailyQuests = dailyQuests.filter(q=>!q.done);
+  // Add 2 random dailies if slots open
+  const needed = 2 - dailyQuests.length;
+  const pool = DAILY_DEFS.filter(d=>!dailyQuests.find(q=>q.def.id===d.id));
+  for(let i=0;i<Math.min(needed,pool.length);i++){
+    const def = pool[Math.floor(Math.random()*pool.length)];
+    pool.splice(pool.indexOf(def),1);
+    dailyQuests.push({def, progress:0, done:false});
+  }
+  if(G.day > 1) pushNotif('📋 Nouveaux objectifs journaliers !', '#6a9abf');
+}
+
+// ── QUEST PANEL ──────────────────────────────────────────────────────────────
+window.addEventListener('keydown', e=>{
+  if(e.code==='KeyQ' && running){ e.preventDefault(); questPanelOpen=!questPanelOpen; }
+});
+
+function drawQuestPanel(c, W, H){
+  if(!questPanelOpen) return;
+  const pW=400, pH=Math.min(500, H-HUD-LOG-40);
+  const px=W-SB-pW-10, py=HUD+10;
+  // Backdrop
+  c.fillStyle='rgba(0,0,0,.6)'; c.fillRect(px-4,py-4,pW+8,pH+8);
+  c.fillStyle='#0c0a06'; c.fillRect(px,py,pW,pH);
+  c.strokeStyle='rgba(212,175,55,.35)'; c.lineWidth=1; c.strokeRect(px,py,pW,pH);
+  // Header
+  c.fillStyle='rgba(212,175,55,.08)'; c.fillRect(px,py,pW,32);
+  c.fillStyle='#f0c93a'; c.font="bold 12px 'Inter',sans-serif"; c.textAlign='left';
+  c.fillText('📋  QUÊTES & OBJECTIFS', px+10, py+21);
+  c.fillStyle='rgba(255,255,255,.2)'; c.font="9px 'Inter',sans-serif"; c.textAlign='right';
+  c.fillText('[Q] Fermer', px+pW-8, py+21);
+
+  let oy = py+40;
+
+  // Daily quests section
+  if(dailyQuests.length){
+    c.fillStyle='rgba(106,154,191,.3)'; c.fillRect(px,oy,pW,18);
+    c.fillStyle='#6a9abf'; c.font="bold 9px 'Inter',sans-serif"; c.textAlign='left';
+    c.fillText('  OBJECTIFS JOURNALIERS — Jour '+G.day, px+8, oy+13);
+    oy += 22;
+    dailyQuests.forEach(q=>{ oy = drawQuestRow(c,px,oy,pW,q,true); });
+  }
+
+  // Active quests section
+  const active = activeQuests.filter(q=>!q.done);
+  if(active.length){
+    c.fillStyle='rgba(212,175,55,.15)'; c.fillRect(px,oy,pW,18);
+    c.fillStyle='rgba(212,175,55,.7)'; c.font="bold 9px 'Inter',sans-serif"; c.textAlign='left';
+    c.fillText('  QUÊTES PNJ', px+8, oy+13);
+    oy += 22;
+    active.forEach(q=>{ oy = drawQuestRow(c,px,oy,pW,q,false); });
+  }
+
+  if(!active.length && !dailyQuests.length){
+    c.fillStyle='rgba(255,255,255,.2)'; c.font="11px 'Inter',sans-serif"; c.textAlign='center';
+    c.fillText('Parle aux PNJ pour recevoir des quêtes !', px+pW/2, oy+30);
+  }
+
+  // Completed count
+  const done = G.completedQuests?.size || 0;
+  c.fillStyle='rgba(255,255,255,.15)'; c.font="8px 'Inter',sans-serif"; c.textAlign='center';
+  c.fillText(`${done} quête(s) accomplie(s) au total`, px+pW/2, py+pH-8);
+}
+
+function drawQuestRow(c, px, oy, pW, q, isDaily){
+  const d = q.def;
+  const rowH = 44;
+  const pct = Math.min(1, q.progress / d.target);
+  const col = isDaily ? '#6a9abf' : '#f0c93a';
+
+  c.fillStyle=q.done?'rgba(106,191,106,.08)':'rgba(255,255,255,.02)';
+  c.fillRect(px+4, oy, pW-8, rowH-2);
+
+  // Icon + title
+  c.font="11px 'Inter',sans-serif"; c.textAlign='left';
+  c.fillStyle='rgba(255,255,255,.8)';
+  c.fillText(`${d.icon} ${d.title}`, px+10, oy+14);
+
+  // Desc
+  c.font="9px 'Inter',sans-serif";
+  c.fillStyle='rgba(255,255,255,.35)';
+  c.fillText(d.desc, px+10, oy+26);
+
+  // Progress bar
+  c.fillStyle='rgba(255,255,255,.06)'; c.fillRect(px+10, oy+30, pW-60, 5);
+  c.fillStyle=q.done?'#6abf6a':col;
+  c.fillRect(px+10, oy+30, Math.round((pW-60)*pct), 5);
+
+  // Progress text
+  c.font="8px 'Inter',sans-serif"; c.textAlign='right';
+  c.fillStyle=col;
+  c.fillText(q.done?'✓ Accompli':`${q.progress}/${d.target}`, px+pW-10, oy+35);
+
+  // Reward
+  const rw = [];
+  if(d.reward.c) rw.push(`+${d.reward.c}€`);
+  if(d.reward.m) rw.push(`+${d.reward.m}MP`);
+  if(d.reward.r) rw.push(`+${d.reward.r}⭐`);
+  rw.push(`+${d.xp}XP`);
+  c.fillStyle='rgba(212,175,55,.4)'; c.font="8px 'Inter',sans-serif"; c.textAlign='left';
+  c.fillText(rw.join(' · '), px+10, oy+38);
+
+  return oy + rowH;
+}
+
+// ── QUEST NOTIFICATIONS ───────────────────────────────────────────────────────
+function drawQuestNotifs(c, W, H){
+  questNotifs = questNotifs.filter(n=>n.timer>0);
+  questNotifs.forEach((n,i)=>{
+    n.timer--;
+    const alpha = n.timer < 30 ? n.timer/30 : n.timer > 150 ? 1 : 1;
+    const y = HUD + 14 + i*34;
+    const tw = c.measureText(n.text).width + 28;
+    const nx = Math.round((W-SB-tw)/2);
+    c.fillStyle=`rgba(10,9,8,${.92*alpha})`;
+    c.fillRect(nx, y, tw, 24);
+    c.strokeStyle=`${n.col}${Math.round(alpha*160).toString(16).padStart(2,'0')}`;
+    c.lineWidth=1; c.strokeRect(nx,y,tw,24);
+    c.fillStyle=`rgba(${n.col==='#6abf6a'?'106,191,106':n.col==='#6a9abf'?'106,154,191':'240,201,58'},${alpha})`;
+    c.font="bold 10px 'Inter',sans-serif"; c.textAlign='center';
+    c.fillText(n.text, nx+tw/2, y+16);
+  });
+}
 // ═══ NPC ═══
 const NPCS={
   barman:{name:'Anthony',role:'Barman',col:'#00c8ff',sprite:drawNpcBarman,lines:[{cond:g=>g.s<=0,text:"T'as plus de stock là... Les clients attendent !"},{cond:g=>g.s>200,text:"Putain t'as brassé combien ? Le frigo déborde 😂"},{cond:g=>g.r<40,text:"Ta réputation est en berne. Fais un effort sur la qualité."},{cond:g=>g.r>80,text:"Tout le monde parle de la Briéronne en ce moment !"},{cond:g=>g.sn===1,text:"Cet été c'est chaud, les terrasses sont pleines. Ramène de la blonde !"},{cond:g=>g.sn===3,text:"La Tourbière se vend bien avec ce temps."},{cond:()=>true,text:"Salut ! Tu livres quoi aujourd'hui ?"}]},
@@ -767,7 +1012,7 @@ const NPCS={
   customer:{name:'Alex',role:'Client fidèle',col:'#a0e060',sprite:drawNpcCustomer,lines:[{cond:g=>g.s<=0,text:"Y'a plus de Cabane Bleue ?! C'est une catastrophe..."},{cond:g=>g.r>85,text:"J'ai lu l'article dans Presse-Océan ! Vous êtes célèbres !"},{cond:g=>g.sn===1,text:"Par cette chaleur, une blonde bien fraîche, c'est parfait !"},{cond:g=>g.sn===3,text:"La Tourbière en hiver c'est divin. Vous en avez encore ?"},{cond:g=>g.day<10,text:"Vous êtes nouveau par ici ? J'ai hâte de goûter vos bières !"},{cond:()=>true,text:"Bonjour ! Deux Chalandières s'il vous plaît."}]},
 };
 function getNpcLine(npc){const matching=npc.lines.filter(l=>l.cond(G));return matching[Math.floor(Math.random()*matching.length)]?.text||npc.lines[npc.lines.length-1].text;}
-function triggerNpcDialog(npcId){const npc=NPCS[npcId];if(!npc)return;sfxDialog();gainXP(5);const pos=getNpcScreenPos(npcId);activeBubble={npcId,text:getNpcLine(npc),timer:220,x:pos.x,y:pos.y,col:npc.col,name:npc.name,charIdx:0};}
+function triggerNpcDialog(npcId){const npc=NPCS[npcId];if(!npc)return;sfxDialog();gainXP(5)offerNpcQuest(npcId==='barman'?'barman':npcId==='supplier'?'supplier':'customer');;const pos=getNpcScreenPos(npcId);activeBubble={npcId,text:getNpcLine(npc),timer:220,x:pos.x,y:pos.y,col:npc.col,name:npc.name,charIdx:0};}
 function getNpcScreenPos(npcId){const W=cv.width,H=cv.height,gh=H-LOG-HUD,cx2=(W-SB)/2,floorY_bar=HUD+gh*.06+Math.round(gh*.88*.55),floorY_depot=HUD+gh*.07+Math.round(gh*.86*.48);if(npcId==='barman')return{x:cx2+80,y:floorY_bar-30};if(npcId==='supplier')return{x:cx2-60,y:floorY_depot-30};if(npcId==='customer')return{x:Math.round((cv.width-SB)*.15),y:HUD+(cv.height-LOG-HUD)*.48};return{x:cx2,y:HUD+(cv.height-LOG-HUD)*.5};}
 function drawNpcBarman(c,x,y){const S=2;c.fillStyle='rgba(0,0,0,.25)';c.fillRect(x-7,y+2,15,3);c.save();c.fillStyle='#1a1010';c.fillRect(x-4,y+14*S,5*S,2*S);c.fillRect(x+1,y+14*S,5*S,2*S);c.fillStyle='#1a1a2a';c.fillRect(x-4,y+10*S,4*S,6*S);c.fillRect(x+1,y+10*S,4*S,6*S);c.fillStyle='#d8d4cc';c.fillRect(x-3*S,y+5*S,6*S,6*S);c.fillStyle='#18181e';c.fillRect(x-3*S,y+5*S,2*S,6*S);c.fillRect(x+S,y+5*S,2*S,6*S);c.fillStyle='#00c8ff';c.fillRect(x-S,y+5*S,2*S,S);c.fillStyle='#d8d4cc';c.fillRect(x-5*S,y+5*S,2*S,5*S);c.fillRect(x+3*S,y+5*S,2*S,5*S);c.fillStyle='#e8c898';c.fillRect(x-5*S,y+9*S,2*S,2*S);c.fillRect(x+3*S,y+9*S,2*S,2*S);c.fillStyle='#f0cca0';c.fillRect(x-2*S,y+S,4*S,4*S);c.fillStyle='#c8843a';c.fillRect(x-2*S,y+S,4*S,S);c.fillStyle='#b87030';c.fillRect(x-2*S,y+S,S,2*S);c.fillRect(x+S,y+S,S,2*S);c.fillStyle='#c08850';c.fillRect(x-2*S,y+4*S,4*S,S);c.fillStyle='#2060a0';c.fillRect(x-S,y+2*S,S,S);c.fillRect(x,y+2*S,S,S);c.fillStyle='#c07868';c.fillRect(x-S,y+4*S,3*S,S);c.restore();}
 function drawNpcSupplier(c,x,y){const S=2;c.fillStyle='rgba(0,0,0,.25)';c.fillRect(x-7,y+2,15,3);c.save();c.fillStyle='#2a1808';c.fillRect(x-4,y+14*S,5*S,2*S);c.fillRect(x+1,y+14*S,5*S,2*S);c.fillStyle='#4a4228';c.fillRect(x-4,y+10*S,4*S,6*S);c.fillRect(x+1,y+10*S,4*S,6*S);c.fillStyle='#484e2e';c.fillRect(x-3*S,y+5*S,6*S,6*S);c.fillStyle='#f0b020';c.fillRect(x-3*S,y+7*S,6*S,S);c.fillStyle='#484e2e';c.fillRect(x-5*S,y+5*S,2*S,5*S);c.fillRect(x+3*S,y+5*S,2*S,5*S);c.fillStyle='#c09060';c.fillRect(x-5*S,y+9*S,2*S,2*S);c.fillRect(x+3*S,y+9*S,2*S,2*S);c.fillStyle='#c09060';c.fillRect(x-2*S,y+S,4*S,4*S);c.fillStyle='#f0b020';c.fillRect(x-3*S,y,6*S,2*S);c.fillRect(x-2*S,y-S,4*S,S);c.fillStyle='#2a1a0a';c.fillRect(x-2*S,y+S,4*S,S);c.fillStyle='#3a2010';c.fillRect(x-2*S,y+3*S,4*S,2*S);c.fillStyle='#2a1808';c.fillRect(x-S,y+2*S,S,S);c.fillRect(x,y+2*S,S,S);c.restore();}
@@ -1003,6 +1248,8 @@ function startGame(){
   document.getElementById('title').style.display='none';
   initG();running=true;skyT=.12;skyTgt=.12;rebuildZones();discovered=new Set(['brewery']);
   cX=1350;cY=WORLD_H*0.38;camX=cX-(cv.width-SB)/2;camY=0;
+  G.completedQuests = new Set();
+  initQuests();
   initAudio();lg('Bienvenue à la Brasserie Briéronne ! 🍺','info');lg('[P] Compétences · [S] Sauvegarder · [M] Son','info');rUI();
 }
 function loadAndStart(){
